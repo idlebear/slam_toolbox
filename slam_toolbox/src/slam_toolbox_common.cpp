@@ -206,11 +206,12 @@ void SlamToolbox::publishVisualizations()
   while(ros::ok())
   {
     updateMap();
-    if(!isPaused(VISUALIZING_GRAPH))
-    {
-      boost::mutex::scoped_lock lock(smapper_mutex_);
-      closure_assistant_->publishGraph();
-    }
+    // TODO: Crash occuring on graph visualization -- cause not verified at this time
+    // if(!isPaused(VISUALIZING_GRAPH))
+    // {
+      // boost::mutex::scoped_lock lock(smapper_mutex_);
+      // closure_assistant_->publishGraph();
+    // }
     r.sleep();
   }
 }
