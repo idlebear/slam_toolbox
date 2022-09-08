@@ -214,12 +214,12 @@ namespace karto
     LaserRangeScan* pLaserRangeScan = dynamic_cast<LaserRangeScan*>(pSensorData);
 
     // verify number of range readings in LaserRangeScan matches the number of expected range readings
-    if (pLaserRangeScan->GetNumberOfRangeReadings() != GetNumberOfRangeReadings())
-    {
-      std::cout << "LaserRangeScan contains " << pLaserRangeScan->GetNumberOfRangeReadings()
-                << " range readings, expected " << GetNumberOfRangeReadings() << std::endl;
-      return false;
-    }
+    // if (pLaserRangeScan->GetNumberOfRangeReadings() != GetNumberOfRangeReadings())
+    // {
+    //   std::cout << "LaserRangeScan contains " << pLaserRangeScan->GetNumberOfRangeReadings()
+    //             << " range readings, expected " << GetNumberOfRangeReadings() << std::endl;
+    //   return false;
+    // }
 
     return true;
   }
