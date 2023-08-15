@@ -118,6 +118,9 @@ void SlamToolbox::setParams(ros::NodeHandle &private_nh)
   private_nh.param("minimum_time_interval", tmp_val, 0.5);
   minimum_time_interval_ = ros::Duration(tmp_val);
 
+  private_nh.param("position_covariance_scale", position_covariance_scale_, 1.0);
+  private_nh.param("yaw_covariance_scale", yaw_covariance_scale_, 1.0);
+
   bool debug = false;
   if (private_nh.getParam("debug_logging", debug) && debug) {
     if (ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME,
@@ -138,25 +141,15 @@ void SlamToolbox::setROSInterfaces(ros::NodeHandle &node)
   tfL_ = std::make_unique<tf2_ros::TransformListener>(*tf_);
   tfB_ = std::make_unique<tf2_ros::TransformBroadcaster>();
   sst_ = node.advertise<nav_msgs::OccupancyGrid>(map_name_, 1, true);
-  sstm_ =
-      node.advertise<nav_msgs::MapMetaData>(map_name_ + "_metadata", 1, true);
-  ssMap_ =
-      node.advertiseService("dynamic_map", &SlamToolbox::mapCallback, this);
-  ssPauseMeasurements_ =
-      node.advertiseService("pause_new_measurements",
-                            &SlamToolbox::pauseNewMeasurementsCallback, this);
-  ssSerialize_ = node.advertiseService(
-      "serialize_map", &SlamToolbox::serializePoseGraphCallback, this);
-  ssDesserialize_ = node.advertiseService(
-      "deserialize_map", &SlamToolbox::deserializePoseGraphCallback, this);
-  scan_filter_sub_ =
-      std::make_unique<message_filters::Subscriber<sensor_msgs::LaserScan>>(
-          node, scan_topic_, 5);
-  scan_filter_ =
-      std::make_unique<tf2_ros::MessageFilter<sensor_msgs::LaserScan>>(
-          *scan_filter_sub_, *tf_, odom_frame_, 5, node);
-  scan_filter_->registerCallback(
-      boost::bind(&SlamToolbox::laserCallback, this, _1));
+  sstm_ = node.advertise<nav_msgs::MapMetaData>(map_name_ + "_metadata", 1, true);
+  ssMap_ = node.advertiseService("dynamic_map", &SlamToolbox::mapCallback, this);
+  ssPauseMeasurements_ = node.advertiseService("pause_new_measurements", &SlamToolbox::pauseNewMeasurementsCallback, this);
+  ssSerialize_ = node.advertiseService("serialize_map", &SlamToolbox::serializePoseGraphCallback, this);
+  ssDesserialize_ = node.advertiseService("deserialize_map", &SlamToolbox::deserializePoseGraphCallback, this);
+  scan_filter_sub_ = std::make_unique<message_filters::Subscriber<sensor_msgs::LaserScan> >(node, scan_topic_, 5);
+  scan_filter_ = std::make_unique<tf2_ros::MessageFilter<sensor_msgs::LaserScan> >(*scan_filter_sub_, *tf_, odom_frame_, 5, node);
+  scan_filter_->registerCallback(boost::bind(&SlamToolbox::laserCallback, this, _1));
+  pose_pub_ = node.advertise<geometry_msgs::PoseWithCovarianceStamped>("pose", 10, true);
 }
 
 /*****************************************************************************/
@@ -463,10 +456,16 @@ SlamToolbox::addScan(karto::LaserRangeFinder *laser,
   boost::mutex::scoped_lock lock(smapper_mutex_);
   bool processed = false, update_reprocessing_transform = false;
 
-  if (processor_type_ == PROCESS) {
-    processed = smapper_->getMapper()->Process(range_scan);
-  } else if (processor_type_ == PROCESS_FIRST_NODE) {
-    processed = smapper_->getMapper()->ProcessAtDock(range_scan);
+  karto::Matrix3 covariance;
+  covariance.SetToIdentity();
+
+  if (processor_type_ == PROCESS)
+  {
+    processed = smapper_->getMapper()->Process(range_scan, &covariance);
+  }
+  else if (processor_type_ == PROCESS_FIRST_NODE)
+  {
+    processed = smapper_->getMapper()->ProcessAtDock(range_scan, &covariance);
     processor_type_ = PROCESS;
     update_reprocessing_transform = true;
   } else if (processor_type_ == PROCESS_NEAR_REGION) {
@@ -479,7 +478,7 @@ SlamToolbox::addScan(karto::LaserRangeFinder *laser,
     range_scan->SetOdometricPose(*process_near_pose_);
     range_scan->SetCorrectedPose(range_scan->GetOdometricPose());
     process_near_pose_.reset(nullptr);
-    processed = smapper_->getMapper()->ProcessAgainstNodesNearBy(range_scan);
+    processed = smapper_->getMapper()->ProcessAgainstNodesNearBy(range_scan, false, &covariance);
     update_reprocessing_transform = true;
     processor_type_ = PROCESS;
   } else {
@@ -497,7 +496,10 @@ SlamToolbox::addScan(karto::LaserRangeFinder *laser,
     setTransformFromPoses(range_scan->GetCorrectedPose(), karto_pose,
                           scan->header.stamp, update_reprocessing_transform);
     dataset_->Add(range_scan);
-  } else {
+    publishPose(range_scan->GetCorrectedPose(), covariance, scan->header.stamp);
+  }
+  else
+  {
     delete range_scan;
     range_scan = nullptr;
   }
@@ -506,8 +508,34 @@ SlamToolbox::addScan(karto::LaserRangeFinder *laser,
 }
 
 /*****************************************************************************/
-bool SlamToolbox::mapCallback(nav_msgs::GetMap::Request &req,
-                              nav_msgs::GetMap::Response &res)
+void SlamToolbox::publishPose(
+  const karto::Pose2 & pose,
+  const karto::Matrix3 & cov,
+  const ros::Time & t)
+/*****************************************************************************/
+{
+  geometry_msgs::PoseWithCovarianceStamped pose_msg;
+  pose_msg.header.stamp = t;
+  pose_msg.header.frame_id = map_frame_;
+
+  tf2::Quaternion q(0., 0., 0., 1.0);
+  q.setRPY(0., 0., pose.GetHeading());
+  tf2::Transform transform(q, tf2::Vector3(pose.GetX(), pose.GetY(), 0.0));
+  tf2::toMsg(transform, pose_msg.pose.pose);
+
+  pose_msg.pose.covariance[0] = cov(0, 0) * position_covariance_scale_;  // x
+  pose_msg.pose.covariance[1] = cov(0, 1) * position_covariance_scale_;  // xy
+  pose_msg.pose.covariance[6] = cov(1, 0) * position_covariance_scale_;  // xy
+  pose_msg.pose.covariance[7] = cov(1, 1) * position_covariance_scale_;  // y
+  pose_msg.pose.covariance[35] = cov(2, 2) * yaw_covariance_scale_;      // yaw
+
+  pose_pub_.publish(pose_msg);
+}
+
+/*****************************************************************************/
+bool SlamToolbox::mapCallback(
+  nav_msgs::GetMap::Request &req,
+  nav_msgs::GetMap::Response &res)
 /*****************************************************************************/
 {
   if (map_.map.info.width && map_.map.info.height) {
@@ -598,7 +626,10 @@ void SlamToolbox::loadSerializedPoseGraph(
   smapper_->configure(nh_);
   dataset_.reset(dataset.release());
 
-  if (!smapper_->getMapper()) {
+  closure_assistant_->setMapper(smapper_->getMapper());
+
+  if (!smapper_->getMapper())
+  {
     ROS_FATAL("loadSerializedPoseGraph: Could not properly load "
               "a valid mapping object. Did you modify something by hand?");
     exit(-1);
